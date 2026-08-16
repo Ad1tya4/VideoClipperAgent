@@ -1,8 +1,14 @@
 .venv/
 .env
 data
-app/chunks
-app/state.db
 __pycache__/
 *.pyc
 .idea/
+
+# Generated pipeline state - all of this is rebuildable, none of it belongs in git.
+app/chunks
+app/clips
+app/chunks.csv
+app/state.db
+app/state.db-wal
+app/state.db-shm

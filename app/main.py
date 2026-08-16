@@ -1,125 +1,103 @@
+# app/main.py
+"""
+Entry point.
+
+Run it with:   python main.py       (from inside the app/ folder)
+           or: python app/main.py   (from the project root)
+
+Both now work identically, because every path is anchored in config.py rather
+than being relative to the current working directory.
+"""
+
 import os
-import subprocess
-from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
+
+from chunker import (
+    createAudioChunks,
+    describeBoundaries,
+    formatTime,
+    registerChunkBoundaries,
+)
+from config import TRANSCRIBE_MODEL
+from database import (
+    getSegment,
+    initialiseDatabase,
+    saveCompletedSegment,
+    saveFailedSegment,
+)
 from matcher import findMatch
 
 load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 
-VIDEO_PATH = BASE_DIR / "data" / "testvid.MP4"
-CHUNKS_DIR = BASE_DIR / "app" / "chunks"
-# VIDEO_PATH = Path("data/testvid.MP4")
-# CHUNKS_DIR = Path("chunks")
-CHUNK_LENGTH = 45
+def transcribeChunk(chunk_path):
+    """
+    Send one audio chunk to the speech-to-text model and return the text.
 
-from database import (
-    initialiseDatabase,
-    getSegment,
-    saveCompletedSegment,
-    saveFailedSegment,
-)
-
-
-def create_audio_chunks(video_path: Path, output_dir: Path):
-    #remove vid, extract audio, chunkify- ffmpeg does this
-    # Create the chunks folder if it doesn't already exist
-
-    output_dir.mkdir(exist_ok=True)
-
-    output_pattern = output_dir / "chunk_%03d.mp3"
-    # This list represents the ffmpeg terminal command
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i", str(video_path),
-        "-vn",
-        "-acodec", "libmp3lame",
-        "-f", "segment",
-        "-segment_time", str(CHUNK_LENGTH),
-        "-reset_timestamps", "1",
-        str(output_pattern),
-    ]
-    #acc executing the command
-    subprocess.run(command, check=True)
-
-
-def transcribe_chunk(chunk_path: Path):
-    #send one audio chunk to OpenAI's speech-to-text model(whisper) via api
-    #and returns the transcript as text.
-    #making it fail to test
+    # --- failure injection, temporary -------------------------------------
+    # Uncomment to make one chunk fail so the resume path can be tested.
+    # M6 replaces this with a proper --fault flag so the demo is reproducible
+    # rather than depending on remembering to comment a line back out.
+    #
     # if chunk_path.name == "chunk_002.mp3":
-    #     raise TimeoutError(
-    #         "Simulated transcription timeout"
-    #     )
+    #     raise TimeoutError("Simulated transcription timeout")
+    # ----------------------------------------------------------------------
+    """
+    # Audio must be opened in binary mode - it is bytes, not text.
     with open(chunk_path, "rb") as audio_file:
-        # Audio files must be read as bytes, not normal text
         transcription = client.audio.transcriptions.create(
-            model="whisper-1",
+            model=TRANSCRIBE_MODEL,
             file=audio_file,
         )
 
     return transcription.text
 
 
-def format_time(seconds: int):
-    #Converts seconds into MM:SS
-    minutes = seconds // 60
-    remaining_seconds = seconds % 60
+def transcribeAllChunks(boundaries):
+    """
+    Walk every chunk, skipping any that a previous run already completed.
 
-    return f"{minutes:02d}:{remaining_seconds:02d}"
-
-
-def main():
-    initialiseDatabase()
-    #STEP1
-    #Turn our long video into lots of 45-second audio files
-    #?we still recreate chunks everytime -yes bur we dont retranscribe
-    create_audio_chunks(VIDEO_PATH, CHUNKS_DIR)
-    #find every chunk in order from chunk folder
-    chunk_files = sorted(CHUNKS_DIR.glob("chunk_*.mp3"))
-
-    '''
-            for every chunk: check (presistant state)status, 
-                if completed:
-                    skip
-                otherwise:
-                    try transcription
-                    success:
-                        save
-                    failure:
-                    save failure '''
-    for index, chunk_path in enumerate(chunk_files):
-        # see where chunk starts ( 1 = 1* 45)
-        start_time = index * CHUNK_LENGTH
-        end_time = start_time + CHUNK_LENGTH
-
-        chunk_name = chunk_path.name
+    This is the resume behaviour the brief asks for, and it is deliberately
+    driven by what is IN THE DATABASE rather than by what is on disk. Chunk
+    files are disposable and get recreated; the transcript is the expensive
+    artefact and it is what we check before spending money again.
+    """
+    for boundary in boundaries:
+        chunk_name = boundary["chunk_name"]
+        chunk_path = boundary["path"]
+        start_time = boundary["start_time"]
+        end_time = boundary["end_time"]
 
         existing_segment = getSegment(chunk_name)
 
+        if existing_segment is not None and existing_segment["status"] == "completed":
+            print(f"[SKIP]    {chunk_name} already transcribed")
+            continue
 
-        if existing_segment is not None:
-            status = existing_segment[3]#loook database status is index3 in row
-
-            if status == "completed":
-                print(
-                    f"[SKIP] {chunk_name} already transcribed."
-                )
-                continue
+        if not chunk_path.exists():
+            # The manifest listed a chunk that is not on disk. Record it as a
+            # failure rather than crashing, so the rest of the video still
+            # gets processed.
+            saveFailedSegment(
+                chunk_name=chunk_name,
+                start_time=start_time,
+                end_time=end_time,
+                error=f"Chunk file missing at {chunk_path}",
+            )
+            print(f"[MISSING] {chunk_name} - no audio file on disk")
+            continue
 
         print(
-            f"\nTranscribing {chunk_name} "
-            f"[{format_time(start_time)} - {format_time(end_time)}]"
+            f"\n[WORK]    {chunk_name} "
+            f"[{formatTime(start_time)} - {formatTime(end_time)}]"
         )
 
         try:
-            transcript = transcribe_chunk(chunk_path)
+            transcript = transcribeChunk(chunk_path)
 
             saveCompletedSegment(
                 chunk_name=chunk_name,
@@ -129,10 +107,13 @@ def main():
             )
 
             print(f"[SUCCESS] {chunk_name}")
-            print(transcript)
-        #?maybe try a couple times rather than just saying nah
-        except Exception as error:
+            print(f"          {transcript[:120]}...")
 
+        # Catching broadly on purpose: any failure here must be RECORDED and
+        # then survived, never allowed to kill the run and lose the chunks
+        # already done. M5 replaces this with proper error classification so
+        # a timeout and a bad API key are not treated identically.
+        except Exception as error:
             saveFailedSegment(
                 chunk_name=chunk_name,
                 start_time=start_time,
@@ -140,21 +121,35 @@ def main():
                 error=str(error),
             )
 
-            print(f"[FAILED] {chunk_name}")
-            print(f"Reason: {error}")
-    ##################################################################################################################
+            print(f"[FAILED]  {chunk_name}")
+            print(f"          reason: {error}")
 
-    query = input(
-        "\nWhat section would you like to find? "
-    )
+
+def main():
+    initialiseDatabase()
+
+    # STEP 1 - cut the audio into chunks and learn their real boundaries.
+    print("Chunking audio...")
+    boundaries = createAudioChunks()
+    registerChunkBoundaries(boundaries)
+    print(describeBoundaries(boundaries))
+
+    # STEP 2 - transcribe anything not already done.
+    print("\nTranscribing...")
+    transcribeAllChunks(boundaries)
+
+    # STEP 3 - find the requested section.
+    # Still a single interactive query. M3 replaces this with a batch of
+    # requests loaded from a file, tracked in the database.
+    query = input("\nWhat section would you like to find? ")
 
     verification, candidates = findMatch(query)
 
     print("\nLLM VERIFICATION")
-    print(f"Matched: {verification.matched}")
-    print(f"Window: {verification.window_id}")
+    print(f"Matched:    {verification.matched}")
+    print(f"Window:     {verification.window_id}")
     print(f"Confidence: {verification.confidence}")
-    print(f"Reason: {verification.reason}")
+    print(f"Reason:     {verification.reason}")
 
 
 if __name__ == "__main__":
