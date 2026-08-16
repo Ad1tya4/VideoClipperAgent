@@ -4,7 +4,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
-
+from matcher import findMatch
 
 load_dotenv()
 
@@ -53,10 +53,10 @@ def transcribe_chunk(chunk_path: Path):
     #send one audio chunk to OpenAI's speech-to-text model(whisper) via api
     #and returns the transcript as text.
     #making it fail to test
-    if chunk_path.name == "chunk_002.mp3":
-        raise TimeoutError(
-            "Simulated transcription timeout"
-        )
+    # if chunk_path.name == "chunk_002.mp3":
+    #     raise TimeoutError(
+    #         "Simulated transcription timeout"
+    #     )
     with open(chunk_path, "rb") as audio_file:
         # Audio files must be read as bytes, not normal text
         transcription = client.audio.transcriptions.create(
@@ -79,6 +79,7 @@ def main():
     initialiseDatabase()
     #STEP1
     #Turn our long video into lots of 45-second audio files
+    #?we still recreate chunks everytime -yes bur we dont retranscribe
     create_audio_chunks(VIDEO_PATH, CHUNKS_DIR)
     #find every chunk in order from chunk folder
     chunk_files = sorted(CHUNKS_DIR.glob("chunk_*.mp3"))
@@ -129,7 +130,7 @@ def main():
 
             print(f"[SUCCESS] {chunk_name}")
             print(transcript)
-
+        #?maybe try a couple times rather than just saying nah
         except Exception as error:
 
             saveFailedSegment(
@@ -141,17 +142,19 @@ def main():
 
             print(f"[FAILED] {chunk_name}")
             print(f"Reason: {error}")
-    # for index, chunk_path in enumerate(chunk_files):
-    #     start_time = index * CHUNK_LENGTH
-    #     end_time = start_time + CHUNK_LENGTH
-    #
-    #     print(
-    #         f"\n[{format_time(start_time)} - {format_time(end_time)}]"
-    #     )
-    #
-    #     transcript = transcribe_chunk(chunk_path)
-    #
-    #     print(transcript)
+    ##################################################################################################################
+
+    query = input(
+        "\nWhat section would you like to find? "
+    )
+
+    verification, candidates = findMatch(query)
+
+    print("\nLLM VERIFICATION")
+    print(f"Matched: {verification.matched}")
+    print(f"Window: {verification.window_id}")
+    print(f"Confidence: {verification.confidence}")
+    print(f"Reason: {verification.reason}")
 
 
 if __name__ == "__main__":

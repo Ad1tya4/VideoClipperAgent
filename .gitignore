@@ -2,6 +2,7 @@
 .env
 data
 app/chunks
+app/state.db
 __pycache__/
 *.pyc
 .idea/
