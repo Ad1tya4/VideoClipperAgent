@@ -130,49 +130,7 @@ app/state.db        all persistent state
 
 Pipeline order: **chunk → transcribe → index → fulfil each request → report.**
 
-### What's stored
 
-| Table | Holds | Prevents |
-|---|---|---|
-| `segments` | One row per chunk: real boundaries, status, transcript, error, retry_count | Re-transcribing completed audio; losing progress on a crash |
-| `utterances` | Every spoken sentence with absolute video timestamps | 90-second clips; cuts landing mid-word |
-| `search_windows` | Overlapping pairs of adjacent chunk transcripts | Topics straddling a chunk boundary matching nothing |
-| `embeddings` | Vectors keyed by hash of their text | Re-paying when the index is rebuilt |
-| `requests` | Per-request lifecycle: status, clip, confidence, strategies, transcript_version | Re-running a decided request; losing a half-finished batch |
-| `decision_log` | Every choice, with its signals as JSON | Unauditable behaviour |
-| `meta` | Which transcript version the index was built from | A recovered chunk staying invisible to search |
-
-
-### Reading the decision log
-
-Prose and signals are stored separately on purpose. The sentence is for a human reading the report; the JSON is for anyone who wants to check whether the threshold that produced the decision was the right one:
-
-```
-decision  : escalate
-reasoning : "Tried 4 strategies (baseline, expand, widen, retranscribe) with no
-             match... Transcript covers only 84.5% of the video — unreadable:
-             90-135s (chunk_002.mp3). The content cannot be ruled out."
-signals   : {"best_similarity": 0.19, "llm_confidence": 0.05,
-             "coverage_ratio": 0.845, "gaps": ["90-135s (chunk_002.mp3)"],
-             "candidates_seen": 5}
-```
-
-Query it directly:
-
-```bash
-cd app
-python -c "import database; [print(dict(r)) for r in database.getDecisionLog()]"
-```
-
-The log is **append-only across runs**, so a request that was escalated on one run and resolved on the next shows both, with the evidence for each.
-
-### A finding from real data
-
-On a real run the correct match scored a cosine similarity of **0.271**  and the LLM verifier confirmed it at **0.99** confidence, correctly. Any naive threshold on similarity would have thrown away a right answer.
-
-Embedding similarity is a good *ranking* signal and a terrible *absolute* one. That's why the LLM gets a vote, and why `route()` never decides anything on similarity alone.
-
----
 
 ## What I'd do next with more time
 
@@ -194,4 +152,107 @@ Things I found, but didn't have time to fix before the deadline:
 
 <p>
 These limitations also highlight the need for stronger testing and evaluation, which is an essential part of developing a reliable system. The next step would be to test the system on longer, noisier videos with labelled ground-truth answers and measure things like retrieval accuracy, false positives, recovery success, latency, and cost.
-</p>---
+</p>
+
+## Engineering decisions
+
+The implementation is designed around one principle: **completed work should never be discarded or unnecessarily repeated**. Expensive artefacts such as transcripts, embeddings and clips are persisted, while cheap deterministic artefacts such as audio chunks and search windows can be recreated when needed.
+
+### Persistent, resumable state
+
+Each audio chunk is tracked in SQLite with its boundaries, transcription status, transcript, error and retry count.
+
+Before transcribing a chunk, the system checks the database:
+
+- completed chunks are skipped
+- failed chunks can be retried independently
+- successful work from earlier runs is preserved
+
+Database writes are transactional, so a state change either commits completely or rolls back. This prevents partially-written state from being treated as completed work.
+
+### Recovery decisions
+
+A request that cannot be matched does not immediately fail. It moves through a small escalation ladder:
+
+| Strategy | Purpose |
+|---|---|
+| **baseline** | Retrieve the strongest transcript windows using embedding similarity and verify them with an LLM |
+| **expand** | Rewrite the request to handle vocabulary and phrasing differences |
+| **widen** | Search more candidates and add lexical matching for names, acronyms and numbers |
+| **retranscribe** | Retry only failed chunks when missing transcript evidence could contain the answer |
+
+Re-transcription is only attempted when transcript coverage contains gaps. If the entire video has already been successfully transcribed, another transcription call cannot reveal new evidence and is therefore skipped.
+
+### Deterministic control flow
+
+The LLM is used for semantic judgement:
+
+> Does this transcript region mean what the user asked for?
+
+The agent's control flow is handled by deterministic Python:
+
+> Should this result be accepted, held, retried, skipped or escalated?
+
+Keeping these responsibilities separate makes the workflow reproducible, testable and easier to audit.
+
+### `UNFOUND` vs `ESCALATED`
+
+A failed match can mean two very different things:
+
+| Result | Meaning |
+|---|---|
+| **UNFOUND** | The whole video was searchable, all strategies were tried, and no match was found |
+| **ESCALATED** | Part of the video could not be transcribed, so the requested content cannot safely be ruled out |
+
+This prevents incomplete transcript coverage from being incorrectly reported as "not found".
+
+### Reconsider only when the evidence changes
+
+Terminal requests store the `transcript_version` they were judged against.
+
+If a request previously returned `UNFOUND` or `ESCALATED`:
+
+- the same transcript version means the request is skipped
+- a changed transcript version means new evidence exists and the request is reconsidered
+
+This is what allows a previously failed chunk to be recovered on a later run without re-running completed requests unnecessarily.
+
+### Coarse retrieval, precise clipping
+
+Search is performed over overlapping transcript windows so content spanning a chunk boundary is still discoverable.
+
+Once a window is matched, Whisper's utterance timestamps are used to narrow it to the sentence-level region that actually answers the request.
+
+If precise narrowing cannot be performed safely, the system falls back to the larger matched window rather than failing the whole request.
+
+### Never repeat expensive work
+
+Several independent reuse checks prevent unnecessary work:
+
+| Check | Avoids |
+|---|---|
+| completed chunk in `segments` | another transcription call |
+| fulfilled request | re-running the strategy ladder |
+| unchanged `transcript_version` | reconsidering the same evidence |
+| embedding cached by text hash | another embedding API call |
+| valid clip already exists for the same time span | another ffmpeg encode |
+
+Clips are identified by their start and end timestamps rather than by the wording of the request. Two differently-worded requests that resolve to the same footage therefore reuse the same clip.
+
+### Partial work never looks complete
+
+Clips are first written to a temporary `*.partial.mp4` file.
+
+Only after the output has been checked for existence, non-zero size and expected duration is it renamed to its final filename.
+
+This means an interrupted ffmpeg process cannot leave behind a half-written file that a later run mistakes for a successful clip.
+
+### Whole-pipeline reruns
+
+The recovery strategy deliberately avoids restarting the entire pipeline.
+
+Each stage resumes independently from persisted state, so recovery is local to the work that actually failed.
+
+Audio chunking is recreated on every run because it is local, deterministic and inexpensive. The expensive work — transcripts, embeddings and clips — is what is persisted and reused.
+
+The main known limitation is that changing the source video is not currently fingerprinted. If the input video changes while `state.db` is retained, the existing transcript state could become stale; input fingerprinting would be the first correctness improvement I would add.
