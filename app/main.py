@@ -61,12 +61,6 @@ def transcribeChunk(chunk_path, prompt: str = None, temperature: float = 0.0):
     """
     Send one audio chunk to the speech-to-text model.
 
-    Returns (text, segments). `segments` are Whisper's per-utterance timings,
-    relative to this chunk - asked for via verbose_json. They are what makes it
-    possible to cut a clip at the sentence that answers the request instead of
-    at the 45-second block containing it. They cost nothing extra: the model
-    computes them either way, the flat-text response just discards them.
-
     `prompt` and `temperature` exist so the recovery path can retry a failed
     chunk with DIFFERENT PARAMETERS rather than doing the same thing again and
     hoping. Whisper takes a prompt as a vocabulary hint, so seeding it with the
@@ -140,7 +134,7 @@ def transcribeAllChunks(boundaries):
 
 def retranscribeSegment(segment, query: str):
     """
-    The recovery action behind the agent's `retranscribe` strategy.
+    recovery(  agent's `retranscribe` strat)
 
     Called only when a request could not be matched AND the transcript has
     holes - i.e. when the missing content might genuinely be in the audio we

@@ -15,7 +15,10 @@ Everything below is anchored to THIS FILE's location, so it cannot drift no
 matter where python is invoked from.
 """
 
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 # __file__ is  .../VideoClipperAgent/app/config.py
 #   .parent   -> .../VideoClipperAgent/app
@@ -25,9 +28,104 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 
+# Loaded here rather than only in main.py, because config is imported before
+# main's own load_dotenv() would run - so without this, a VIDEO_PATH set in
+# .env would be invisible at the moment we need it.
+load_dotenv(PROJECT_ROOT / ".env")
+
 # --- inputs ----------------------------------------------------------------
 
-VIDEO_PATH = PROJECT_ROOT / "data" / "testvid.MP4"
+DATA_DIR = PROJECT_ROOT / "data"
+
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".mkv", ".webm", ".avi",
+    ".m4v", ".mpg", ".mpeg", ".wmv", ".flv",
+}
+
+
+def discoverVideos(data_dir: Path = DATA_DIR):
+    """Every file in data/ that looks like a video."""
+    if not data_dir.exists():
+        return []
+
+    return sorted(
+        path for path in data_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+    )
+
+
+def resolveVideoPath():
+    """
+    Work out which video to process.
+
+    Drop any video into data/ and it is picked up - no editing of source
+    required, which matters because the first thing anyone does with a cloned
+    repo is point it at their own file.
+
+    Order of precedence:
+      1. VIDEO_PATH in the environment or .env  (explicit beats implicit)
+      2. the single video file in data/
+
+    Ambiguity is an error rather than a guess: if data/ holds two videos, this
+    says so and names them, instead of silently processing whichever sorts
+    first and producing a transcript of the wrong recording.
+    """
+    override = os.getenv("VIDEO_PATH")
+
+    if override:
+        path = Path(override).expanduser()
+
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+
+        if not path.exists():
+            raise FileNotFoundError(
+                f"VIDEO_PATH is set to '{override}' but no file exists at "
+                f"{path}."
+            )
+
+        return path
+
+    videos = discoverVideos()
+
+    if not videos:
+        raise FileNotFoundError(
+            f"No video found in {DATA_DIR}.\n"
+            f"  Put one there (any of {', '.join(sorted(VIDEO_EXTENSIONS))}), "
+            f"or set VIDEO_PATH in your .env file."
+        )
+
+    if len(videos) > 1:
+        names = "\n    ".join(video.name for video in videos)
+        raise ValueError(
+            f"Found {len(videos)} videos in {DATA_DIR} and cannot tell which "
+            f"one you mean:\n    {names}\n"
+            f"  Leave one in place, or set VIDEO_PATH in your .env file."
+        )
+
+    return videos[0]
+
+
+# Resolved at import so it can be a default argument, but a failure here must
+# not crash on import - the message is far more useful when it surfaces at the
+# point the video is actually needed.
+try:
+    VIDEO_PATH = resolveVideoPath()
+    VIDEO_PATH_ERROR = None
+except (FileNotFoundError, ValueError) as error:
+    VIDEO_PATH = None
+    VIDEO_PATH_ERROR = str(error)
+
+
+def requireVideoPath(video_path: Path = None):
+    """Return a usable video path, or raise the discovery error explaining why not."""
+    path = video_path or VIDEO_PATH
+
+    if path is None:
+        raise FileNotFoundError(VIDEO_PATH_ERROR)
+
+    return path
+
 
 # The batch of clip requests to fulfil. See request_store.py for the format.
 REQUESTS_PATH = PROJECT_ROOT / "requests.json"

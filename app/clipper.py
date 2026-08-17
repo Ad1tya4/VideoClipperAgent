@@ -42,8 +42,8 @@ from config import (
     CLIP_PADDING_SECONDS,
     CLIP_STREAM_COPY,
     CLIPS_DIR,
-    VIDEO_PATH,
     ensure_dirs,
+    requireVideoPath,
 )
 
 # ffprobe is cheap but not free, and the source video's duration never changes
@@ -79,7 +79,8 @@ def probeDuration(media_path: Path):
         return None
 
 
-def getVideoDuration(video_path: Path = VIDEO_PATH):
+def getVideoDuration(video_path: Path = None):
+    video_path = requireVideoPath(video_path)
     key = str(video_path)
 
     if key not in _duration_cache:
@@ -184,7 +185,7 @@ def buildFfmpegCommand(video_path: Path, output_path: Path,
 
 
 def cutClip(start_time: float, end_time: float,
-            video_path: Path = VIDEO_PATH,
+            video_path: Path = None,
             padding: float = CLIP_PADDING_SECONDS):
     """
     Cut [start_time, end_time] (plus padding) out of the video.
@@ -208,6 +209,7 @@ def cutClip(start_time: float, end_time: float,
     """
     ensure_dirs()
 
+    video_path = requireVideoPath(video_path)
     video_duration = getVideoDuration(video_path)
 
     # Padding stops clips opening and closing mid-word. Clamping stops us

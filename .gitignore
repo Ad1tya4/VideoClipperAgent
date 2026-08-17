@@ -1,11 +1,15 @@
 .venv/
 .env
-data
 __pycache__/
 *.pyc
 .idea/
 
-# Generated pipeline state - all of this is rebuildable, none of it belongs in git.
+# Source video(s) - too large for git, supplied by whoever runs it.
+# The folder itself IS tracked, so a fresh clone has somewhere to put one.
+data/*
+!data/.gitkeep
+
+# Generated pipeline state - all rebuildable, none of it belongs in git.
 app/chunks
 app/clips
 app/chunks.csv

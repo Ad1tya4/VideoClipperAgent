@@ -3,11 +3,16 @@
 Cut the source video's audio into chunks, and record exactly where each chunk
 sits in the video.
 
+The one idea that matters in this file:
+
     We do not CALCULATE where chunks begin. We ask ffmpeg where it actually cut.
 
 `-segment_time 45` is a request, not a guarantee. ffmpeg cuts at the next
 packet boundary at or after 45 seconds, and it obviously cannot make the final
-chunk 45 seconds long if there isnt that much of it.
+chunk 45 seconds long when only 20 seconds of video remain. Computing
+`index * 45` therefore produced boundaries that were wrong at the end of the
+video and that drift in the middle, with the drift growing as the video gets
+longer.
 
 Concretely, on a 290.6 second video the old arithmetic claimed the last chunk
 covered 270 -> 315 seconds: 24 seconds of video that do not exist.
@@ -39,13 +44,13 @@ from config import (
     CHUNK_SECONDS,
     CHUNKS_DIR,
     SEGMENT_LIST_PATH,
-    VIDEO_PATH,
     ensure_dirs,
+    requireVideoPath,
 )
 from database import upsertSegmentBounds
 
 
-def createAudioChunks(video_path: Path = VIDEO_PATH,
+def createAudioChunks(video_path: Path = None,
                       output_dir: Path = CHUNKS_DIR):
     """
     Strip the video track, downmix the audio, and split it into chunks.
@@ -54,11 +59,9 @@ def createAudioChunks(video_path: Path = VIDEO_PATH,
     """
     ensure_dirs()
 
-    if not video_path.exists():
-        raise FileNotFoundError(
-            f"No video at {video_path}. Put your file there, or change "
-            f"VIDEO_PATH in config.py."
-        )
+    # Raises with the discovery message ("no video in data/", "two videos and
+    # I cannot tell which") rather than a bare path error.
+    video_path = requireVideoPath(video_path)
 
     # Remove chunks from any previous run first. Without this, shortening the
     # video would leave the old, longer run's trailing chunks lying around and

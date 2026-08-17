@@ -3,7 +3,7 @@
 All persistent state lives here.
 
 The pipeline's core promise is that completed work is never thrown away, and
-that promise is only as good as this file. Two things changed in M0:
+that promise is only as good as this file.
 
 1. The database path is now anchored to the project (see config.py) instead
    of the current working directory.
@@ -41,22 +41,20 @@ def connect():
     guessing what actually got written.
 
     Since the entire project is about surviving failures halfway through,
-    "a write either fully happened or fully did not" is a property worth
-    buying for six lines of code.
+    "a write either fully happened or fully did not" this ensures that
     """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     connection = sqlite3.connect(DB_PATH)
 
     # Rows can now be read by column name - row["status"] instead of row[3].
-    # Positional access breaks silently and wrongly when a column is added;
+    # Positional access breaks silently and is wrong based on order of collumns retrieved
     # name access breaks loudly, which is the failure mode you want.
     # sqlite3.Row still unpacks like a tuple, so existing code keeps working.
     connection.row_factory = sqlite3.Row
 
     # Write-ahead logging. If the process is killed mid-write (Ctrl-C, crash,
-    # closing the laptop), SQLite can recover the file rather than leaving it
-    # corrupt. Cheap insurance for a pipeline designed to be interrupted.
+    # closing the laptop), SQLite writes to wal file and then if fully done we commit else not
     connection.execute("PRAGMA journal_mode=WAL")
 
     try:
@@ -308,8 +306,7 @@ def saveFailedSegment(chunk_name: str, start_time: float,
 
     retry_count is deliberately incremented rather than set, because the agent
     needs to know HOW MANY times something has been tried, not just that it is
-    currently broken. Nothing reads it yet - that is M5, where it becomes the
-    input to "retry, change parameters, or give up".
+    currently broken.
     """
     with connect() as connection:
         connection.execute(
@@ -367,12 +364,9 @@ def getSearchWindows():
 
 def transcriptVersion():
     """
-    A fingerprint of the current usable transcript.
+    fingerprint of the entire current transcript state across all chunks.
 
-    Changes when a chunk newly succeeds, when a transcript's text changes, or
-    when a chunk's status changes. Does NOT change when unrelated things do -
-    so comparing it answers exactly one question: "is there new evidence since
-    the last time I decided this?"
+    so if another request comes later and a chunk is now succesfully transcribed then we get new fingerprint
     """
     with connect() as connection:
         rows = connection.execute(

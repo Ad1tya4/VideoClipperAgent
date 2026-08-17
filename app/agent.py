@@ -1,6 +1,5 @@
 # app/agent.py
 """
-The decision layer - the part that makes this an agent rather than a search box.
 
 THE CENTRAL DESIGN CHOICE
 -------------------------
@@ -11,16 +10,9 @@ The routing is ordinary Python, not a prompt. The division of labour is:
 
     This file answers "given that answer, what should happen next?"
                      - a control-flow decision, which needs to be reproducible,
-                       testable, free to run, and defensible line by line.
+                       testable, free to run, and defensible line by line.deterministic
 
-Asking a model to decide "retry, skip or escalate?" would produce a decision I
-could not reproduce, could not unit test, and could only explain by quoting the
-model's own account of itself. `route()` below is a pure function of its inputs:
-the same signals always produce the same decision and the same sentence
-explaining it.
-
-THE LADDER
-----------
+--------------------------------------------------------------------------------------
 A request that does not match is not immediately given up on. It escalates
 through strategies that attack different reasons for failing:
 
@@ -33,7 +25,7 @@ through strategies that attack different reasons for failing:
                      specific chunks and try again
 
 Then a terminal decision: `unfound` if the whole video was searched,
-`escalated` if part of it could not be.
+`escalated` if part of it could not be(missing chunks so cant be sure get huma to look at that part maybe)
 
 THE GUARD I CARE MOST ABOUT
 ---------------------------
