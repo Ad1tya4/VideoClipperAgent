@@ -253,6 +253,6 @@ The recovery strategy deliberately avoids restarting the entire pipeline.
 
 Each stage resumes independently from persisted state, so recovery is local to the work that actually failed.
 
-Audio chunking is recreated on every run because it is local, deterministic and inexpensive. The expensive work — transcripts, embeddings and clips — is what is persisted and reused.
+Audio chunking is recreated on every run because it is local, deterministic and inexpensive. The expensive work (transcripts, embeddings and clips ) is what is persisted and reused.
 
 The main known limitation is that changing the source video is not currently fingerprinted. If the input video changes while `state.db` is retained, the existing transcript state could become stale; input fingerprinting would be the first correctness improvement I would add.
