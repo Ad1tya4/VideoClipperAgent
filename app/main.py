@@ -1,18 +1,10 @@
 # app/main.py
 """
-Entry point.
-
-    cd app
-    python main.py
-
-    python main.py --fault chunk_002.mp3    simulate that chunk failing to
-                                            transcribe, for demonstrating
-                                            recovery reproducibly
+    python main.py --fault chunk_002.mp3    simulate that chunk failing to transcribe so we can demo recovery reporducibility
 
 The pipeline:
-
     1. cut the video's audio into chunks, and learn their real boundaries
-    2. transcribe any chunk not already transcribed
+    2. transcribe any chunk not already transcribed ( we dont do extra work)
     3. register the batch of clip requests
     4. work each request that still needs work, escalating through strategies
     5. print what was clipped, what was not, and why
@@ -46,6 +38,7 @@ from database import (
     logDecision,
     saveCompletedSegment,
     saveFailedSegment,
+    saveUtterances,
     transcriptVersion,
 )
 from matcher import ensureSearchIndex
@@ -66,13 +59,19 @@ FAULT_CHUNKS: set[str] = set()
 
 def transcribeChunk(chunk_path, prompt: str = None, temperature: float = 0.0):
     """
-    Send one audio chunk to the speech-to-text model and return the text.
+    Send one audio chunk to the speech-to-text model.
+
+    Returns (text, segments). `segments` are Whisper's per-utterance timings,
+    relative to this chunk - asked for via verbose_json. They are what makes it
+    possible to cut a clip at the sentence that answers the request instead of
+    at the 45-second block containing it. They cost nothing extra: the model
+    computes them either way, the flat-text response just discards them.
 
     `prompt` and `temperature` exist so the recovery path can retry a failed
-    chunk with DIFFERENT PARAMETERS rather than simply doing the same thing
-    again and hoping. Whisper accepts a prompt as a vocabulary hint, so seeding
-    it with the clip request biases decoding toward the words we are looking
-    for - which is exactly the situation where a chunk is worth re-reading.
+    chunk with DIFFERENT PARAMETERS rather than doing the same thing again and
+    hoping. Whisper takes a prompt as a vocabulary hint, so seeding it with the
+    clip request biases decoding toward the words being looked for - which is
+    exactly the situation where a chunk is worth re-reading.
     """
     if chunk_path.name in FAULT_CHUNKS:
         raise TimeoutError(
@@ -80,7 +79,12 @@ def transcribeChunk(chunk_path, prompt: str = None, temperature: float = 0.0):
         )
 
     with open(chunk_path, "rb") as audio_file:
-        kwargs = {"model": TRANSCRIBE_MODEL, "file": audio_file}
+        kwargs = {
+            "model": TRANSCRIBE_MODEL,
+            "file": audio_file,
+            "response_format": "verbose_json",
+            "timestamp_granularities": ["segment"],
+        }
 
         if prompt:
             kwargs["prompt"] = prompt[:220]
@@ -88,7 +92,7 @@ def transcribeChunk(chunk_path, prompt: str = None, temperature: float = 0.0):
 
         transcription = client.audio.transcriptions.create(**kwargs)
 
-    return transcription.text
+    return transcription.text, getattr(transcription, "segments", None)
 
 
 def transcribeAllChunks(boundaries):
@@ -121,9 +125,11 @@ def transcribeAllChunks(boundaries):
               f"[{formatTime(start_time)} - {formatTime(end_time)}]")
 
         try:
-            transcript = transcribeChunk(chunk_path)
+            transcript, utterances = transcribeChunk(chunk_path)
             saveCompletedSegment(chunk_name, start_time, end_time, transcript)
-            print(f"[SUCCESS] {chunk_name}")
+            saveUtterances(chunk_name, start_time, utterances)
+            print(f"[SUCCESS] {chunk_name} "
+                  f"({len(utterances or [])} utterances)")
 
         # Broad on purpose: any failure here must be RECORDED and survived,
         # never allowed to end the run and discard the chunks already done.
@@ -167,10 +173,13 @@ def retranscribeSegment(segment, query: str):
     print(f"[RETRY]   re-transcribing {chunk_name} with a vocabulary hint")
 
     try:
-        transcript = transcribeChunk(chunk_path, prompt=query, temperature=0.2)
+        transcript, utterances = transcribeChunk(
+            chunk_path, prompt=query, temperature=0.2
+        )
 
         saveCompletedSegment(chunk_name, segment["start_time"],
                              segment["end_time"], transcript)
+        saveUtterances(chunk_name, segment["start_time"], utterances)
 
         logDecision(
             stage="transcribe", chunk_name=chunk_name,

@@ -133,6 +133,27 @@ def initialiseDatabase():
             """
         )
 
+        # Individual spoken utterances, with absolute video timestamps.
+        #
+        # Whisper returns per-utterance timings, relative to the chunk it was
+        # given. Storing them at chunk_start + relative makes them absolute,
+        # which is what lets a clip be cut at the sentence that answers the
+        # request rather than at the 45-second block that happens to contain
+        # it. Without this the finest possible cut is a whole window - about 90
+        # seconds - which is a chapter, not a clip.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS utterances (
+                chunk_name TEXT NOT NULL,
+                idx        INTEGER NOT NULL,
+                start_time REAL NOT NULL,
+                end_time   REAL NOT NULL,
+                text       TEXT NOT NULL,
+                PRIMARY KEY (chunk_name, idx)
+            )
+            """
+        )
+
         # Small key/value store. Currently holds the transcript version the
         # search index was built from, which is what stops stale windows
         # surviving a chunk that failed on one run and succeeded on the next.
@@ -476,6 +497,54 @@ def getAllRequests(request_ids: list[str] = None):
             f"SELECT * FROM requests WHERE request_id IN ({placeholders}) "
             f"ORDER BY rowid",
             request_ids,
+        ).fetchall()
+
+
+def saveUtterances(chunk_name: str, chunk_start: float, segments):
+    """
+    Store one chunk's utterances with absolute video timestamps.
+
+    `segments` is what Whisper returns under verbose_json: objects with
+    .start / .end (relative to the chunk) and .text. Adding chunk_start makes
+    them absolute - which is the whole reason the chunker measures real
+    boundaries instead of assuming index * 45.
+
+    Replaces any existing rows for the chunk, so a re-transcription overwrites
+    rather than accumulating two versions of the same audio.
+    """
+    with connect() as connection:
+        connection.execute(
+            "DELETE FROM utterances WHERE chunk_name = ?", (chunk_name,)
+        )
+
+        for index, segment in enumerate(segments or []):
+            start = float(getattr(segment, "start", 0.0))
+            end = float(getattr(segment, "end", 0.0))
+            text = (getattr(segment, "text", "") or "").strip()
+
+            if not text:
+                continue
+
+            connection.execute(
+                """
+                INSERT INTO utterances (chunk_name, idx, start_time, end_time, text)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (chunk_name, index, chunk_start + start, chunk_start + end, text),
+            )
+
+
+def getUtterancesInRange(start_time: float, end_time: float):
+    """Every utterance overlapping a span, in order."""
+    with connect() as connection:
+        return connection.execute(
+            """
+            SELECT chunk_name, idx, start_time, end_time, text
+            FROM utterances
+            WHERE end_time > ? AND start_time < ?
+            ORDER BY start_time
+            """,
+            (start_time, end_time),
         ).fetchall()
 
 

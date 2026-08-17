@@ -47,6 +47,8 @@ from config import (
     FULL_COVERAGE_RATIO,
     LOW_CONFIDENCE_THRESHOLD,
     MAX_STRATEGIES_PER_REQUEST,
+    MIN_CLIP_SECONDS,
+    NARROW_TO_UTTERANCES,
     TOP_K_BASELINE,
     TOP_K_WIDE,
 )
@@ -63,6 +65,7 @@ from matcher import (
     expandQuery,
     lexicalCandidates,
     mergeCandidates,
+    narrowToUtterances,
     retrieveCandidates,
     retrieveExpanded,
     scoreWindows,
@@ -350,7 +353,7 @@ def processRequest(request, retranscribe_fn=None):
         )
 
         if decision == "accept":
-            return _fulfil(request_id, attempt, version_at_start,
+            return _fulfil(request_id, query, attempt, version_at_start,
                            strategies_tried, matched_window, verification,
                            signals, low_confidence=(
                                float(verification.confidence)
@@ -371,20 +374,88 @@ def processRequest(request, retranscribe_fn=None):
                 f"flagging for review rather than reporting nothing."
             ),
         )
-        return _fulfil(request_id, attempt, version_at_start, strategies_tried,
-                       matched_window, verification, signals,
+        return _fulfil(request_id, query, attempt, version_at_start,
+                       strategies_tried, matched_window, verification, signals,
                        low_confidence=True)
 
     return _giveUp(request_id, attempt, version_at_start, strategies_tried,
                    getCoverage())
 
 
-def _fulfil(request_id, attempt, version, strategies_tried, matched_window,
-            verification, signals, low_confidence=False):
-    clip_result = cutClip(
-        start_time=matched_window["start_time"],
-        end_time=matched_window["end_time"],
+def enforceMinimumLength(start_time: float, end_time: float):
+    """
+    Grow a very short selection around its midpoint.
+
+    A single sentence that answers the request can be two seconds long. That is
+    technically the precise answer and useless to watch, so anything under
+    MIN_CLIP_SECONDS is expanded symmetrically. cutClip clamps the result to
+    the real bounds of the video, so growing past the end is safe.
+    """
+    duration = end_time - start_time
+
+    if duration >= MIN_CLIP_SECONDS:
+        return start_time, end_time, False
+
+    shortfall = (MIN_CLIP_SECONDS - duration) / 2.0
+    return max(0.0, start_time - shortfall), end_time + shortfall, True
+
+
+def selectSpan(request_id, query, attempt, matched_window, signals):
+    """
+    Choose what to actually cut: the precise utterances, or the whole window.
+
+    Returns (start_time, end_time).
+    """
+    window_start = matched_window["start_time"]
+    window_end = matched_window["end_time"]
+
+    if not NARROW_TO_UTTERANCES:
+        return window_start, window_end
+
+    start_time, end_time, reason = narrowToUtterances(query, matched_window)
+
+    if start_time is None:
+        # Narrowing is a precision improvement, not a requirement. When it
+        # cannot run, fall back to the behaviour that existed before it - a
+        # coarser clip, never a failed one - and record why.
+        logDecision(
+            stage="clip", request_id=request_id, attempt=attempt,
+            strategy="narrow", signals=signals, decision="narrow_fallback",
+            reasoning=f"{reason} Cutting the full window "
+                      f"{window_start:.1f}-{window_end:.1f}s instead.",
+        )
+        return window_start, window_end
+
+    start_time, end_time, widened = enforceMinimumLength(start_time, end_time)
+
+    logDecision(
+        stage="clip", request_id=request_id, attempt=attempt,
+        strategy="narrow", decision="narrowed",
+        signals={
+            **signals,
+            "window_span": round(window_end - window_start, 1),
+            "narrowed_span": round(end_time - start_time, 1),
+            "widened_to_minimum": widened,
+        },
+        reasoning=(
+            f"Narrowed the {window_end - window_start:.0f}s window to "
+            f"{start_time:.1f}-{end_time:.1f}s "
+            f"({end_time - start_time:.0f}s). {reason}"
+            + (f" Expanded to the {MIN_CLIP_SECONDS:.0f}s minimum clip length."
+               if widened else "")
+        ),
     )
+
+    return start_time, end_time
+
+
+def _fulfil(request_id, query, attempt, version, strategies_tried,
+            matched_window, verification, signals, low_confidence=False):
+    start_time, end_time = selectSpan(
+        request_id, query, attempt, matched_window, signals
+    )
+
+    clip_result = cutClip(start_time=start_time, end_time=end_time)
 
     if clip_result["status"] == "failed":
         logDecision(

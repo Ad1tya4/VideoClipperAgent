@@ -41,6 +41,7 @@ from database import (
     getCompletedSegments,
     getMeta,
     getSearchWindows,
+    getUtterancesInRange,
     saveCachedEmbedding,
     saveSearchWindow,
     setMeta,
@@ -344,6 +345,95 @@ class MatchVerification(BaseModel):
     window_id: int | None
     confidence: float
     reason: str
+
+
+class UtteranceSelection(BaseModel):
+    start_index: int
+    end_index: int
+    reason: str
+
+
+def narrowToUtterances(query: str, window: dict):
+    """
+    Second-stage selection: find the exact span inside a matched window.
+
+    Retrieval is deliberately coarse - overlapping ~90 second windows, because
+    recall matters more than precision when you are deciding WHERE to look.
+    But a 90 second file is a chapter, not a clip. So once a window has been
+    chosen, the model is asked a much narrower and much cheaper question: of
+    these numbered utterances, which ones actually answer the request?
+
+    Returns (start_time, end_time, reason) or (None, None, why_not).
+    Returning None is a normal outcome, not an error - the caller falls back to
+    the whole window, which is exactly the behaviour before this existed. A
+    precision feature that fails should degrade, not break.
+    """
+    utterances = getUtterancesInRange(window["start_time"], window["end_time"])
+
+    if not utterances:
+        return None, None, (
+            "No utterance timestamps stored for this span - it was transcribed "
+            "before per-utterance timings were recorded. Cutting the whole window."
+        )
+
+    if len(utterances) == 1:
+        return (utterances[0]["start_time"], utterances[0]["end_time"],
+                "Only one utterance in the window.")
+
+    numbered = "\n".join(
+        f"[{index}] {u['start_time']:.1f}-{u['end_time']:.1f}s  {u['text']}"
+        for index, u in enumerate(utterances)
+    )
+
+    response = client.responses.parse(
+        model=VERIFICATION_MODEL,
+        input=[
+            {
+                "role": "system",
+                "content": (
+                    "You select the exact portion of a transcript that answers a "
+                    "clip request. You are given numbered utterances from a "
+                    "section already known to contain the content.\n\n"
+                    "Return the index of the first and last utterance that "
+                    "should be in the clip. Include enough surrounding context "
+                    "that the clip makes sense on its own - start where the "
+                    "topic is introduced, end where it is finished - but do NOT "
+                    "return the whole range out of caution. Being specific is "
+                    "the point.\n\n"
+                    "start_index and end_index must both be valid indices from "
+                    "the list, and start_index must not be greater than "
+                    "end_index."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"CLIP REQUEST:\n{query}\n\nUTTERANCES:\n{numbered}",
+            },
+        ],
+        text_format=UtteranceSelection,
+    )
+
+    selection = response.output_parsed
+    last = len(utterances) - 1
+
+    # Same lesson as window ids: structured output guarantees an integer, not a
+    # valid one. An out-of-range index here would silently cut from the wrong
+    # place or crash on a list lookup.
+    if not (0 <= selection.start_index <= last and 0 <= selection.end_index <= last):
+        return None, None, (
+            f"Model returned utterance range "
+            f"[{selection.start_index}, {selection.end_index}] but only indices "
+            f"0-{last} exist. Falling back to the whole window."
+        )
+
+    first_index = min(selection.start_index, selection.end_index)
+    last_index = max(selection.start_index, selection.end_index)
+
+    return (
+        utterances[first_index]["start_time"],
+        utterances[last_index]["end_time"],
+        selection.reason,
+    )
 
 
 def formatCandidates(candidates):

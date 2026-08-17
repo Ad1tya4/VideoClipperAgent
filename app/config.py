@@ -90,6 +90,15 @@ MAX_STRATEGIES_PER_REQUEST = 4
 # rather than reported as a clean hit.
 LOW_CONFIDENCE_THRESHOLD = 0.55
 
+# After a window matches, narrow the cut to the specific utterances that
+# answer the request. Turn off to cut whole windows instead.
+NARROW_TO_UTTERANCES = True
+
+# Never produce a clip shorter than this. A single matching sentence can be two
+# seconds long, which is technically precise and useless to watch - so a very
+# short selection is widened around its centre until it has some context.
+MIN_CLIP_SECONDS = 8.0
+
 # Transcript coverage at or above this counts as "the whole video is readable".
 # Not 1.0, because summing float chunk durations will not land exactly.
 FULL_COVERAGE_RATIO = 0.999
