@@ -1,0 +1,6 @@
+# Python dependencies. ffmpeg and ffprobe are also required and are NOT
+# installable with pip - see the README for platform instructions.
+
+openai>=1.66.0
+python-dotenv>=1.0.0
+pydantic>=2.7.0

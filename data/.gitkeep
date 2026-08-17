@@ -1,0 +1,9 @@
+Put your source video in this folder.
+
+Any common video format works (.mp4 .mov .mkv .webm .avi .m4v .mpg .wmv .flv).
+The agent finds it automatically - no configuration needed.
+
+If you keep more than one video here, the agent will stop and ask which you
+mean rather than guessing. Set VIDEO_PATH in your .env file to choose:
+
+    VIDEO_PATH=data/my_recording.mp4
